@@ -57,7 +57,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Advanced BLE Input Controller</title>
     <style>
-        :root { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --accent: #00d2ff; --danger: #ff5252; --warn: #ffaa00; --success: #4CAF50; }
+        :root { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --accent: #00d2ff; --danger: #ff5252; --warn: #ffaa00; --success: #4CAF50; --nuclear: #9c27b0; }
         body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; justify-content: center; }
         .container { background: var(--card); max-width: 600px; width: 100%; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         h2 { margin-top: 0; color: var(--accent); }
@@ -75,12 +75,13 @@ const char* htmlPage PROGMEM = R"rawliteral(
         .input-box label { margin-top: 0; font-size: 0.85em; color: var(--warn); margin-bottom: 8px; }
         .input-box input[type="number"] { width: 100%; background: #1e1e1e; color: #fff; border: 1px solid #444; padding: 8px; border-radius: 4px; font-size: 1em; box-sizing: border-box; font-family: monospace; }
         
-        .button-row { display: flex; gap: 10px; margin-top: 20px; }
+        .button-row { display: flex; gap: 10px; margin-top: 15px; }
         button { flex: 1; border: none; padding: 15px; font-size: 1.1em; font-weight: bold; border-radius: 8px; cursor: pointer; transition: opacity 0.2s; color: #000; }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
         button:active:not(:disabled) { opacity: 0.8; }
         
-        #formatBtn { background: var(--success); color: white; margin-top: 10px; width: 100%; margin-bottom: 15px; }
+        #formatBtn { background: var(--success); color: white; }
+        #oneLineBtn { background: var(--nuclear); color: white; }
         #injectBtn { background: var(--accent); }
         #cancelBtn { background: var(--danger); color: white; max-width: 120px; }
         .toggle-group { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
@@ -99,9 +100,12 @@ const char* htmlPage PROGMEM = R"rawliteral(
             <span id="estTime">Est. Time: 00:00</span>
         </div>
 
-        <button id="formatBtn" onclick="formatCode()">1. FORMAT & PREVIEW CODE</button>
+        <div class="button-row">
+            <button id="formatBtn" onclick="formatCode()">1. PREVIEW FORMAT</button>
+            <button id="oneLineBtn" onclick="oneLineInject()" disabled>⚡ ONE-LINE INJECT</button>
+        </div>
         
-        <div class="toggle-group">
+        <div class="toggle-group" style="margin-top: 15px;">
             <input type="checkbox" id="smartBrackets" checked onchange="saveSettings()">
             <label for="smartBrackets" style="margin:0; color: var(--accent);">IDE Smart Brackets (Down-Arrow Bypass)</label>
         </div>
@@ -141,7 +145,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
         </div>
 
         <div class="button-row">
-            <button id="injectBtn" onclick="startInjectionSequence()" disabled>2. INJECT CODE</button>
+            <button id="injectBtn" onclick="startInjectionSequence()" disabled>2. NORMAL INJECT</button>
             <button id="cancelBtn" onclick="sendCancel()">CANCEL</button>
         </div>
     </div>
@@ -152,7 +156,6 @@ const char* htmlPage PROGMEM = R"rawliteral(
         const statusText = document.getElementById('connStatus');
         
         let audioCtx; 
-        
         let payloadChunks = [];
         let currentChunkIndex = 0;
         let pollingInterval = null;
@@ -166,6 +169,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
             if (isConnected) {
                 wpmSlider.max = 150;
                 document.getElementById('injectBtn').disabled = false;
+                document.getElementById('oneLineBtn').disabled = false;
                 if (!pollingInterval) statusText.innerHTML = `<span style="color: var(--success);">BLE Handshake Verified. 150 WPM Unlocked.</span>`;
             } else {
                 if (parseInt(wpmSlider.value) > 120) {
@@ -173,12 +177,12 @@ const char* htmlPage PROGMEM = R"rawliteral(
                 }
                 wpmSlider.max = 120;
                 document.getElementById('injectBtn').disabled = true;
+                document.getElementById('oneLineBtn').disabled = true;
                 if (!pollingInterval) statusText.innerHTML = `<span style="color: var(--danger);">Target PC Disconnected. WPM Capped.</span>`;
             }
             document.getElementById('wpmVal').innerText = wpmSlider.value;
         }
 
-        // Background poller to monitor BLE handshake state while idle
         setInterval(() => {
             if (!pollingInterval) {
                 fetch('/status')
@@ -273,37 +277,50 @@ const char* htmlPage PROGMEM = R"rawliteral(
             document.getElementById('estTime').innerText = `Est. Time: ${mins}m ${secs.toString().padStart(2, '0')}s`;
         }
 
-        // --- THE SMART FLATTENER ---
+        // --- NORMAL SMART FLATTENER ---
         function formatCode() {
             let text = textArea.value;
             if(!text) return alert("Paste code first.");
             
-            // 1. Strip comments
             text = text.replace(/\/\*[\s\S]*?\*\//g, '');
             text = text.replace(/(?<!:)\/\/.*/g, '');
             
-            // 2. Strip indents and blanks
             let lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-            
-            // 3. Glues multi-line statements (like massive 'if' blocks) into a single line
             let flattened = [];
             let buffer = "";
-            
             for (let line of lines) {
                 if (buffer.length > 0) buffer += " ";
                 buffer += line;
-                
-                // If the line ends in a structural terminator, it's safe to press ENTER.
                 if (buffer.match(/[{};:]$/)) {
                     flattened.push(buffer);
                     buffer = "";
                 }
             }
-            // Push anything left over
             if (buffer.length > 0) flattened.push(buffer);
             
             textArea.value = flattened.join('\n');
             updateStats();
+        }
+
+        // --- NUCLEAR ONE-LINE INJECT ---
+        function oneLineInject() {
+            let text = textArea.value;
+            if(!text) return alert("Paste code first.");
+            
+            // Aggressive stripping (MANDATORY: Must kill URLs so they don't comment out the whole program)
+            text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+            text = text.replace(/\/\/.*/g, ''); 
+            
+            // Brutal flatten
+            text = text.replace(/\s+/g, ' ').trim();
+            textArea.value = text;
+            
+            // Force-disable IDE overrides for this run
+            document.getElementById('smartBrackets').checked = false;
+            document.getElementById('escKiller').checked = false;
+            updateStats();
+            
+            startInjectionSequence();
         }
 
         function splitIntoChunks(text) {
@@ -343,6 +360,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
             payloadChunks = splitIntoChunks(text);
             currentChunkIndex = 0;
             document.getElementById('injectBtn').disabled = true;
+            document.getElementById('oneLineBtn').disabled = true;
             
             if (payloadChunks.length > 1) {
                 alert(`Massive Payload Detected! Splitting into ${payloadChunks.length} parts.\n\nPLEASE KEEP YOUR PHONE AWAKE ON THIS SCREEN UNTIL IT FINISHES.`);
@@ -356,6 +374,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
             if (currentChunkIndex >= payloadChunks.length) {
                 statusText.innerHTML = `<span class="alert-text" style="color: var(--success);">Injection Complete!</span>`;
                 document.getElementById('injectBtn').disabled = false;
+                document.getElementById('oneLineBtn').disabled = false;
                 playFinishSound();
                 return;
             }
@@ -384,8 +403,8 @@ const char* htmlPage PROGMEM = R"rawliteral(
                 body: chunkText
             }).then(async res => {
                 if(res.ok) {
-                    if (!isMultiPart && currentChunkIndex === 0) {
-                        alert(`Injection Started! Expected Time: ` + document.getElementById('estTime').innerText + `\n\nIt is safe to turn off your phone screen. You will hear a chime when finished.`);
+                    if (!isMultiPart && currentChunkIndex === 0 && !document.getElementById('oneLineBtn').disabled) {
+                        // Suppress alert for one-line nuclear mode flow optimization
                     }
                     if (isMultiPart) {
                         consecutivePollFailures = 0;
@@ -398,6 +417,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
                             playFinishSound();
                             statusText.innerHTML = `<span class="alert-text" style="color: var(--success);">Injection Complete!</span>`;
                             document.getElementById('injectBtn').disabled = false;
+                            document.getElementById('oneLineBtn').disabled = false;
                         }, waitTime);
                     }
                 } else {
@@ -411,10 +431,12 @@ const char* htmlPage PROGMEM = R"rawliteral(
                         alert("Injection failed. ESP32 error.");
                     }
                     document.getElementById('injectBtn').disabled = false;
+                    document.getElementById('oneLineBtn').disabled = false;
                 }
             }).catch(err => {
                 alert("Network Error during injection.");
                 document.getElementById('injectBtn').disabled = false;
+                document.getElementById('oneLineBtn').disabled = false;
                 statusText.innerHTML = `<span style="color: var(--danger);">Connection lost to ESP32 AP.</span>`;
             });
         }
@@ -439,6 +461,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
                 if (consecutivePollFailures >= MAX_POLL_FAILURES) {
                     stopPolling();
                     document.getElementById('injectBtn').disabled = false;
+                    document.getElementById('oneLineBtn').disabled = false;
                     statusText.innerHTML = `<span class="alert-text" style="color: var(--danger);">Connection lost to ESP32 AP.</span>`;
                     alert("Lost communication with ESP32 Access Point.");
                 }
@@ -457,6 +480,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
             stopPolling();
             if (finishTimer) clearTimeout(finishTimer); 
             document.getElementById('injectBtn').disabled = false;
+            document.getElementById('oneLineBtn').disabled = false;
             
             fetch('/cancel', { method: 'POST' })
             .then(res => { 
@@ -476,11 +500,13 @@ void handleRoot() {
 }
 
 void handleInject() {
+    // 1. Race Condition Guard
     if (isInjecting) {
         server.send(409, "text/plain", "SYSTEM_BUSY");
         return;
     }
 
+    // 2. Pre-Flight Verification
     if (!bleKeyboard.isConnected()) {
         server.send(400, "text/plain", "BLE_DISCONNECTED");
         return;
