@@ -42,7 +42,6 @@ const char* htmlPage PROGMEM = R"rawliteral(
         .val-display { color: var(--warn); font-size: 1.1em; }
         input[type="range"] { width: 100%; accent-color: var(--accent); }
         
-        /* New Grid for Number Boxes */
         .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
         .input-box { background: #2a2a2a; padding: 10px 15px; border-radius: 8px; }
         .input-box label { margin-top: 0; font-size: 0.85em; color: var(--warn); margin-bottom: 8px; }
@@ -62,9 +61,14 @@ const char* htmlPage PROGMEM = R"rawliteral(
         <h2>⌨️ Linear Human Injector</h2>
         <div class="status">Connect Target PC to "ESP32 Injector" via Bluetooth.</div>
         
-        <textarea id="textPayload" placeholder="Paste formatted flush-left code here..."></textarea>
+        <textarea id="textPayload" placeholder="Paste raw code here. Auto-formatter will clean it up..."></textarea>
         
         <div class="toggle-group">
+            <input type="checkbox" id="autoFormat" checked>
+            <label for="autoFormat" style="margin:0; color: var(--accent);">Auto-Format Code (Strip comments, indents, blank lines)</label>
+        </div>
+        
+        <div class="toggle-group" style="margin-top: 0;">
             <input type="checkbox" id="liveMode">
             <label for="liveMode" style="margin:0;">Live Mode (Type as you go)</label>
         </div>
@@ -101,6 +105,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
     <script>
         const textArea = document.getElementById('textPayload');
         const liveMode = document.getElementById('liveMode');
+        const autoFormat = document.getElementById('autoFormat');
         
         function calculateWPM(val) { return 10 + (val / 100) * 110; }
         
@@ -110,12 +115,30 @@ const char* htmlPage PROGMEM = R"rawliteral(
 
         function sendAction(endpoint) {
             if(liveMode.checked) { alert("Disable Live Mode to inject full payload."); return; }
-            const text = textArea.value;
+            let text = textArea.value;
             if(!text) return alert("Please enter some text first.");
+            
+            // --- AUTO FORMATTER LOGIC ---
+            if(autoFormat.checked) {
+                // 1. Remove block comments /* ... */
+                text = text.replace(/\/\*[\s\S]*?\*\//g, '');
+                
+                // 2. Remove line comments // ... 
+                // Note: This will also strip anything after // in a string like "http://"
+                text = text.replace(/\/\/.*/g, '');
+                
+                // 3. Process line by line deterministically
+                text = text.split('\n')
+                    .map(line => line.trim()) // Strip leading/trailing indents and spaces
+                    .filter(line => line.length > 0) // Remove blank lines
+                    .join('\n'); // Reassemble with standard line breaks
+                    
+                // Update the text area so you can visually confirm the sanitization
+                textArea.value = text;
+            }
             
             const wpm = Math.round(calculateWPM(document.getElementById('wpmSlider').value));
             
-            // Get values from the new number boxes
             const jitter = parseInt(document.getElementById('jitterVal').value) || 0;
             const pFreq = parseInt(document.getElementById('pauseFreq').value) || 0;
             const pDur = parseInt(document.getElementById('pauseDur').value) || 0;
@@ -188,7 +211,7 @@ void loop() {
 
             // --- SMART LINE START LOGIC ---
             if (atLineStart) {
-                // Eat any leading spaces or tabs to prevent bad copy-pastes
+                // Eat any leading spaces or tabs (Safety net for the web formatter)
                 if (c == ' ' || c == '\t' || c == '\r') {
                     payloadIndex++;
                     return; 
@@ -217,7 +240,7 @@ void loop() {
             else if (c != '\r') {
                 bleKeyboard.press(c); delay(40); bleKeyboard.releaseAll();
                 
-                // Calculate human jitter (Removed the 1000ms hard cap)
+                // Calculate human jitter
                 float msPerChar = 60000.0 / (targetWPM * 5.0);
                 delayMs = (long)msPerChar;
                 
