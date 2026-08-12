@@ -3,6 +3,11 @@
 #include <WebServer.h>
 #include <BleKeyboard.h>
 
+// --- KEY_ESC FALLBACK ---
+#ifndef KEY_ESC
+#define KEY_ESC 177
+#endif
+
 const char* AP_SSID = "Input_Controller";
 const char* AP_PASS = "12345678"; 
 
@@ -25,6 +30,7 @@ int pauseDurationMs = 2000;
 int pauseJitterPercent = 20;
 bool useSmartBrackets = true; 
 bool useEscKiller = true; 
+
 unsigned long nextTypeTime = 0;
 
 // --- NON-BLOCKING DELAY WITH KEY SAFETY ---
@@ -85,7 +91,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
 <body>
     <div class="container">
         <h2>⌨️ Smart Java Injector</h2>
-        <div class="status" id="connStatus">Connect Target PC to "ESP32 Injector" via Bluetooth.</div>
+        <div class="status" id="connStatus">Checking hardware status...</div>
         
         <textarea id="textPayload" placeholder="Paste limitless raw Java code here..." oninput="updateStats()"></textarea>
         <div class="stats-bar">
@@ -101,7 +107,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
         </div>
 
         <div class="toggle-group">
-            <input type="checkbox" id="escKiller" checked onchange="saveSettings()">
+            <input type="checkbox" id="escKiller" checked onchange="updateStats(); saveSettings();">
             <label for="escKiller" style="margin:0; color: var(--warn);">IDE Popup Killer (Press ESC before Enter)</label>
         </div>
 
@@ -112,7 +118,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
         
         <div class="slider-container">
             <label>Speed: <span id="wpmVal" class="val-display">120</span> WPM</label>
-            <input type="range" id="wpmSlider" min="0" max="150" value="120" oninput="updateStats(); saveSettings();">
+            <input type="range" id="wpmSlider" min="0" max="120" value="120" oninput="updateStats(); saveSettings();">
         </div>
         
         <div class="input-grid">
@@ -135,7 +141,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
         </div>
 
         <div class="button-row">
-            <button id="injectBtn" onclick="startInjectionSequence()">2. INJECT CODE</button>
+            <button id="injectBtn" onclick="startInjectionSequence()" disabled>2. INJECT CODE</button>
             <button id="cancelBtn" onclick="sendCancel()">CANCEL</button>
         </div>
     </div>
@@ -154,6 +160,35 @@ const char* htmlPage PROGMEM = R"rawliteral(
         const MAX_CHUNK_SIZE = 12000;
         let consecutivePollFailures = 0;
         const MAX_POLL_FAILURES = 5;
+
+        // --- BLE HANDSHAKE SLIDER CAP LOGIC ---
+        function updateSliderCap(isConnected) {
+            if (isConnected) {
+                wpmSlider.max = 150;
+                document.getElementById('injectBtn').disabled = false;
+                if (!pollingInterval) statusText.innerHTML = `<span style="color: var(--success);">BLE Handshake Verified. 150 WPM Unlocked.</span>`;
+            } else {
+                if (parseInt(wpmSlider.value) > 120) {
+                    wpmSlider.value = 120;
+                }
+                wpmSlider.max = 120;
+                document.getElementById('injectBtn').disabled = true;
+                if (!pollingInterval) statusText.innerHTML = `<span style="color: var(--danger);">Target PC Disconnected. WPM Capped.</span>`;
+            }
+            document.getElementById('wpmVal').innerText = wpmSlider.value;
+        }
+
+        // Background poller to monitor BLE handshake state while idle
+        setInterval(() => {
+            if (!pollingInterval) {
+                fetch('/status')
+                .then(res => res.text())
+                .then(state => {
+                    if (state === "ready") updateSliderCap(true);
+                    else if (state === "disconnected") updateSliderCap(false);
+                }).catch(e => updateSliderCap(false));
+            }
+        }, 3000);
 
         function unlockAudio() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -186,7 +221,8 @@ const char* htmlPage PROGMEM = R"rawliteral(
 
         window.onload = () => {
             const savedWPM = localStorage.getItem('wpm');
-            if (savedWPM) wpmSlider.value = savedWPM;
+            if (savedWPM && savedWPM <= 120) wpmSlider.value = savedWPM; 
+            
             ['jitterVal', 'pauseFreq', 'pauseDur', 'pauseJit'].forEach(id => {
                 if (localStorage.getItem(id)) document.getElementById(id).value = localStorage.getItem(id);
             });
@@ -208,7 +244,6 @@ const char* htmlPage PROGMEM = R"rawliteral(
             localStorage.setItem('soundToggle', document.getElementById('soundToggle').checked);
         }
 
-        // --- ACCURATE ESTIMATION WITH NEWLINE PENALTIES ---
         function calculateTotalMs(text) {
             if (text.length === 0) return 0;
             const wpm = parseInt(wpmSlider.value) || 120;
@@ -220,7 +255,8 @@ const char* htmlPage PROGMEM = R"rawliteral(
             const newlines = (text.match(/\n/g) || []).length;
             const estimatedPauses = spaces * (pauseFreq / 100.0);
             
-            return (text.length * msPerChar) + (estimatedPauses * pauseDur) + (newlines * 150);
+            const escPenalty = document.getElementById('escKiller').checked ? 50 : 0;
+            return (text.length * msPerChar) + (estimatedPauses * pauseDur) + (newlines * (150 + escPenalty));
         }
 
         function updateStats() {
@@ -237,13 +273,36 @@ const char* htmlPage PROGMEM = R"rawliteral(
             document.getElementById('estTime').innerText = `Est. Time: ${mins}m ${secs.toString().padStart(2, '0')}s`;
         }
 
+        // --- THE SMART FLATTENER ---
         function formatCode() {
             let text = textArea.value;
             if(!text) return alert("Paste code first.");
+            
+            // 1. Strip comments
             text = text.replace(/\/\*[\s\S]*?\*\//g, '');
             text = text.replace(/(?<!:)\/\/.*/g, '');
-            text = text.split('\n').map(line => line.trim()).filter(line => line.length > 0).join('\n'); 
-            textArea.value = text;
+            
+            // 2. Strip indents and blanks
+            let lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+            
+            // 3. Glues multi-line statements (like massive 'if' blocks) into a single line
+            let flattened = [];
+            let buffer = "";
+            
+            for (let line of lines) {
+                if (buffer.length > 0) buffer += " ";
+                buffer += line;
+                
+                // If the line ends in a structural terminator, it's safe to press ENTER.
+                if (buffer.match(/[{};:]$/)) {
+                    flattened.push(buffer);
+                    buffer = "";
+                }
+            }
+            // Push anything left over
+            if (buffer.length > 0) flattened.push(buffer);
+            
+            textArea.value = flattened.join('\n');
             updateStats();
         }
 
@@ -343,18 +402,20 @@ const char* htmlPage PROGMEM = R"rawliteral(
                     }
                 } else {
                     const errText = await res.text();
-                    if (errText === "BLE_DISCONNECTED") {
+                    if (errText === "SYSTEM_BUSY") {
+                        alert("ESP32 is already injecting! Please wait.");
+                    } else if (errText === "BLE_DISCONNECTED") {
+                        updateSliderCap(false);
                         alert("Target PC not connected via Bluetooth! Ensure the host is paired.");
                     } else {
                         alert("Injection failed. ESP32 error.");
                     }
                     document.getElementById('injectBtn').disabled = false;
-                    statusText.innerText = "Connect Target PC to 'ESP32 Injector' via Bluetooth.";
                 }
             }).catch(err => {
                 alert("Network Error during injection.");
                 document.getElementById('injectBtn').disabled = false;
-                statusText.innerText = "Connect Target PC to 'ESP32 Injector' via Bluetooth.";
+                statusText.innerHTML = `<span style="color: var(--danger);">Connection lost to ESP32 AP.</span>`;
             });
         }
 
@@ -366,8 +427,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
                 
                 if (state === "disconnected") {
                     stopPolling();
-                    document.getElementById('injectBtn').disabled = false;
-                    statusText.innerHTML = `<span class="alert-text" style="color: var(--danger);">BLE Dropped. Sequence Aborted.</span>`;
+                    updateSliderCap(false);
                     alert("Hardware disconnected! Injection aborted.");
                 } else if (state === "ready") {
                     stopPolling();
@@ -401,7 +461,7 @@ const char* htmlPage PROGMEM = R"rawliteral(
             fetch('/cancel', { method: 'POST' })
             .then(res => { 
                 if(res.ok) {
-                    statusText.innerText = "Connect Target PC to 'ESP32 Injector' via Bluetooth.";
+                    statusText.innerHTML = `<span class="alert-text" style="color: var(--warn);">Action Cancelled!</span>`;
                     alert("Action Cancelled!"); 
                 }
             });
@@ -411,12 +471,16 @@ const char* htmlPage PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- FIX: Using send_P to stream the large HTML directly from flash memory! ---
 void handleRoot() { 
     server.send_P(200, "text/html", htmlPage); 
 }
 
 void handleInject() {
+    if (isInjecting) {
+        server.send(409, "text/plain", "SYSTEM_BUSY");
+        return;
+    }
+
     if (!bleKeyboard.isConnected()) {
         server.send(400, "text/plain", "BLE_DISCONNECTED");
         return;
@@ -475,7 +539,6 @@ void setup() {
     payload.reserve(13000); 
     
     bleKeyboard.begin();
-    
     WiFi.softAP(AP_SSID, AP_PASS);
     
     server.on("/", HTTP_GET, handleRoot);
@@ -487,7 +550,7 @@ void setup() {
 
 void loop() {
     // --- NON-BLOCKING HARDWARE PANIC CHECK ---
-    if (digitalRead(PANIC_PIN) == LOW && isInjecting) {
+    if (digitalRead(PANIC_PIN) == LOW) {
         isInjecting = false;
         bleKeyboard.releaseAll();
         Serial.println("HARDWARE PANIC BUTTON PRESSED!");
@@ -512,10 +575,19 @@ void loop() {
 
     if (bleKeyboard.isConnected() && isInjecting) {
         if (millis() >= nextTypeTime) {
+            
+            // Bounds check evaluated before payload memory extraction
+            if (payloadIndex >= payload.length()) {
+                isInjecting = false;
+                payload = ""; 
+                return;
+            }
+            
             char c = payload[payloadIndex];
             long delayMs = 80;
 
             if (atLineStart) {
+                // Instantly consume bad leading whitespace
                 if (c == ' ' || c == '\t' || c == '\r') {
                     payloadIndex++;
                     return; 
@@ -541,6 +613,7 @@ void loop() {
                     bleKeyboard.press(KEY_ESC); smartDelay(30); bleKeyboard.releaseAll();
                     if (!isInjecting) return;
                     smartDelay(20);
+                    if (!isInjecting) return; 
                 }
                 
                 bleKeyboard.press(KEY_RETURN); smartDelay(40); bleKeyboard.releaseAll();
@@ -550,6 +623,7 @@ void loop() {
             else if (c != '\r') {
                 bleKeyboard.press(c); 
                 smartDelay(40); 
+                if (!isInjecting) return; // Safe array progression interrupt
                 bleKeyboard.releaseAll();
                 
                 float msPerChar = 60000.0 / (targetWPM * 5.0);
@@ -560,7 +634,8 @@ void loop() {
                     delayMs += random(-jitterAmount, jitterAmount + 1);
                 }
                 
-                if (delayMs < 80) delayMs = 80; 
+                // Floor dropped to 50ms to physically allow 150 WPM execution
+                if (delayMs < 50) delayMs = 50; 
                 
                 if (c == ' ' && pauseChance > 0) {
                     if (random(0, 100) < pauseChance) {
@@ -578,13 +653,14 @@ void loop() {
 
             payloadIndex++;
             
+            // Double-check termination to clear memory exactly on the last char
             if (payloadIndex >= payload.length()) {
                 isInjecting = false;
                 payload = ""; 
             }
             
             long nextDelay = delayMs - 40;
-            if (nextDelay < 5) nextDelay = 5; // Guard against integer underflow crash
+            if (nextDelay < 5) nextDelay = 5; 
             
             nextTypeTime = millis() + nextDelay;
         }
